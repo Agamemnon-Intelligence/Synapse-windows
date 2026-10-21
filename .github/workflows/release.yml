@@ -1,0 +1,66 @@
+name: Release
+
+# Builds Synapse for Windows and publishes a GitHub release for the version in Directory.Build.props.
+# Runs on every push to main; does nothing if that version is already released.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $v = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Select-Object -First 1
+          "version=$v" >> $env:GITHUB_OUTPUT
+          gh release view "v$v" *> $null
+          "exists=$($LASTEXITCODE -eq 0 ? 'true' : 'false')" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.version.outputs.exists == 'false'
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Inno Setup
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build x64
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: ./build.ps1 -Arch x64
+
+      - name: Build arm64
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: ./build.ps1 -Arch arm64 -SkipTests
+
+      - name: Publish release
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $notes = @"
+          Run AI models on your PC, or use free cloud models, in one Windows app.
+
+          **Install:** download ``Synapse-$v-win-x64-setup.exe`` (or ``arm64`` for Snapdragon PCs) and run it. No admin rights needed.
+          Windows SmartScreen may warn because the app isn't code-signed yet: click **More info → Run anyway**.
+          Prefer no installer? Unzip the ``portable`` zip and run ``Synapse.exe``.
+
+          Requires Windows 10 (1809) or later with the Microsoft Edge WebView2 Runtime (included in Windows 11).
+          "@
+          gh release create "v$v" (Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }).FullName --title "Synapse $v" --notes $notes

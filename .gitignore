@@ -1,0 +1,13 @@
+bin/
+obj/
+artifacts/
+publish/
+*.user
+.vs/
+.vscode/
+.idea/
+TestResults/
+node_modules/
+.claude/
+.DS_Store
+dist/

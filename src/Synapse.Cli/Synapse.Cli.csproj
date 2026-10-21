@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>synapse</AssemblyName>
+    <RootNamespace>Synapse.Cli</RootNamespace>
+    <ApplicationIcon>..\..\assets\synapse.ico</ApplicationIcon>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Published as one small self-contained exe into the app's cli\ folder. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+</Project>
