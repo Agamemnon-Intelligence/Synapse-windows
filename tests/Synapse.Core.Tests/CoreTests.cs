@@ -230,3 +230,28 @@ public class LlamaFallbackTests
         Assert.All(picked, a => Assert.StartsWith("https://github.com/ggml-org/llama.cpp/releases/download/", a.Url));
     }
 }
+
+public class LlamaReleaseTests
+{
+    [Fact]
+    public void SkipsTheLatestFlagAndPicksTheNewestWindowsBuild()
+    {
+        var json = (JsonArray)JsonNode.Parse("""
+            [
+              {"tag_name":"v0.7.0","draft":false,"prerelease":false,"assets":[{"name":"llama-cpp-python.tar.gz","browser_download_url":"x","size":1}]},
+              {"tag_name":"b7001","draft":false,"prerelease":true,"assets":[{"name":"llama-b7001-bin-win-cpu-x64.zip","browser_download_url":"u1","size":30}]},
+              {"tag_name":"b7002","draft":false,"prerelease":true,"assets":[{"name":"llama-b7002-bin-macos-arm64.tar.gz","browser_download_url":"u2","size":30}]},
+              {"tag_name":"b7000","draft":false,"prerelease":true,"assets":[{"name":"llama-b7000-bin-win-cpu-x64.zip","browser_download_url":"u3","size":30}]}
+            ]
+            """)!;
+        var r = LocalEngine.PickRelease(json);
+        Assert.Equal("b7001", r?.Tag);
+    }
+
+    [Fact]
+    public void FindsTheBuildTagOnTheReleasesPage()
+    {
+        var html = """<a href="/ggml-org/llama.cpp/releases/tag/v0.7.0">v0.7.0</a> <a href="/ggml-org/llama.cpp/releases/tag/b6998">b6998</a> <a href="/ggml-org/llama.cpp/releases/tag/b7004">b7004</a>""";
+        Assert.Equal("b7004", LocalEngine.LatestBuildTag(html));
+    }
+}

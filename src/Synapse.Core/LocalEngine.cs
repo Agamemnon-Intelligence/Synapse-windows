@@ -263,49 +263,62 @@ public sealed class LocalEngine(IPlatform platform, Action changed)
         return Find($@"^llama-.*-bin-win-cpu-{a}\.zip$") is { } cpu ? [cpu] : [];
     }
 
+    /// The newest llama.cpp build with Windows binaries. Builds are tagged b1234 and published as
+    /// pre-releases, so GitHub's "latest release" points at something else entirely.
     public static async Task<(string Tag, List<ReleaseAsset> Assets)> LatestRelease(CancellationToken ct)
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest");
+            using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20");
             req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
             using var resp = await ChatClient.Http.SendAsync(req, cts.Token);
             var text = await resp.Content.ReadAsStringAsync(cts.Token);
             if (!resp.IsSuccessStatusCode) throw new ApiException((int)resp.StatusCode, ChatClient.ErrorMessage(text));
-            var obj = JsonNodeExt.ParseOrNull(text);
-            var tag = obj.Str("tag_name");
-            var assets = (obj?["assets"] as JsonArray ?? []).Select(a => new ReleaseAsset(a.Str("name"), a.Str("browser_download_url"),
-                a?["size"] is JsonValue v && v.TryGetValue<long>(out var l) ? l : 0)).ToList();
-            if (tag.Length > 0 && assets.Count > 0) return (tag, assets);
-            throw new ApiException(0, "The release list was empty.");
+            var pick = PickRelease(JsonNodeExt.ParseOrNull(text) as JsonArray ?? []);
+            if (pick != null) return pick.Value;
+            throw new ApiException(0, "No release with Windows builds in the list.");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception)
         {
             // The GitHub API is rate-limited (60 requests/hour per IP) and blocked on some networks.
-            // The release page redirect still tells us the latest tag; the file names follow a fixed pattern.
-            var tag = await LatestTagFromRedirect(ct);
+            // The releases page still lists the build tags; the file names follow a fixed pattern.
+            var tag = await LatestBuildTagFromPage(ct);
             return (tag, GuessAssets(tag));
         }
     }
 
-    static readonly HttpClient NoRedirect = new(new SocketsHttpHandler { AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(20) })
+    internal static (string Tag, List<ReleaseAsset> Assets)? PickRelease(JsonArray releases)
     {
-        Timeout = TimeSpan.FromSeconds(30),
-    };
-
-    static async Task<string> LatestTagFromRedirect(CancellationToken ct)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Head, "https://github.com/ggml-org/llama.cpp/releases/latest");
-        req.Headers.TryAddWithoutValidation("User-Agent", "Synapse-Windows");
-        using var resp = await NoRedirect.SendAsync(req, ct);
-        var location = resp.Headers.Location?.ToString() ?? "";
-        var m = Regex.Match(location, @"/releases/tag/([^/?#]+)");
-        if (!m.Success) throw new ApiException((int)resp.StatusCode, "Couldn't reach GitHub to find the latest llama.cpp release. Check your internet connection (or proxy/firewall) and try again.");
-        return Uri.UnescapeDataString(m.Groups[1].Value);
+        var best = releases
+            .Select(r => (Tag: r.Str("tag_name"), Draft: r.Bool("draft"), Assets: (r?["assets"] as JsonArray ?? [])
+                .Select(a => new ReleaseAsset(a.Str("name"), a.Str("browser_download_url"), a?["size"] is JsonValue v && v.TryGetValue<long>(out var l) ? l : 0)).ToList()))
+            .Where(r => !r.Draft && r.Assets.Any(a => Regex.IsMatch(a.Name, @"^llama-.*-bin-win-cpu-(x64|arm64)\.zip$")))
+            .OrderByDescending(r => BuildNumber(r.Tag))
+            .FirstOrDefault();
+        return best.Tag == null ? null : (best.Tag, best.Assets);
     }
+
+    static int BuildNumber(string tag) => Regex.Match(tag, @"^b(\d+)$") is { Success: true } m ? int.Parse(m.Groups[1].Value) : -1;
+
+    static async Task<string> LatestBuildTagFromPage(CancellationToken ct)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
+        string html;
+        try { html = await ChatClient.Http.GetStringAsync("https://github.com/ggml-org/llama.cpp/releases", cts.Token); }
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            throw new ApiException(0, "Couldn't reach GitHub to find the latest llama.cpp build. Check your internet connection (or proxy/firewall) and try again.");
+        }
+        return LatestBuildTag(html) ?? throw new ApiException(0, "Couldn't find a llama.cpp build on the releases page.");
+    }
+
+    internal static string? LatestBuildTag(string html) =>
+        Regex.Matches(html, @"/ggml-org/llama\.cpp/releases/tag/(b\d+)\b").Select(m => m.Groups[1].Value)
+            .OrderByDescending(BuildNumber).FirstOrDefault();
 
     /// The Windows assets every llama.cpp release publishes (see its release-publish workflow).
     internal static List<ReleaseAsset> GuessAssets(string tag)
