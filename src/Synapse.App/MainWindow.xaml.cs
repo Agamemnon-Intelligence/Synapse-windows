@@ -94,7 +94,7 @@ public partial class MainWindow : Window
         browser.Changed += SyncBrowserPanel;
 
         SetupUi(Ui.CoreWebView2);
-        _bridge = new BridgeHost(_app, json => { try { Ui.CoreWebView2.PostWebMessageAsString(json); } catch { } }, $"https://{FileHost}/?path=");
+        _bridge = new BridgeHost(_app!, json => { try { Ui.CoreWebView2.PostWebMessageAsString(json); } catch { } }, $"https://{FileHost}/?path=");
         _bridge.HostCommand += OnHostCommand;
         Ui.CoreWebView2.Navigate($"https://{UiHost}/index.html");
         SyncBrowserPanel();
