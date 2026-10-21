@@ -88,6 +88,17 @@ public sealed class LocalEngine(IPlatform platform, Action changed)
         changed();
 
         var bin = ServerPath;
+        if (bin == null && OperatingSystem.IsWindows())
+        {
+            // First local model: install the engine on the spot.
+            StatusText = "Installing llama.cpp";
+            changed();
+            try { await EnsureInstalled(); } catch (ApiException e) { Fail("llama.cpp isn't installed"); throw new ApiException(0, e.Message); }
+            bin = ServerPath;
+            State = EngineState.Loading;
+            StatusText = model.DisplayName;
+            changed();
+        }
         if (bin == null)
         {
             Fail("llama.cpp isn't installed");
@@ -254,16 +265,82 @@ public sealed class LocalEngine(IPlatform platform, Action changed)
 
     public static async Task<(string Tag, List<ReleaseAsset> Assets)> LatestRelease(CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest");
-        req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
-        using var resp = await ChatClient.Http.SendAsync(req, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
-        if (!resp.IsSuccessStatusCode) throw new ApiException((int)resp.StatusCode, "Couldn't check llama.cpp releases: " + ChatClient.ErrorMessage(text));
-        var obj = JsonNodeExt.ParseOrNull(text);
-        var tag = obj.Str("tag_name");
-        var assets = (obj?["assets"] as JsonArray ?? []).Select(a => new ReleaseAsset(a.Str("name"), a.Str("browser_download_url"),
-            a?["size"] is JsonValue v && v.TryGetValue<long>(out var l) ? l : 0)).ToList();
-        return (tag, assets);
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest");
+            req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            using var resp = await ChatClient.Http.SendAsync(req, cts.Token);
+            var text = await resp.Content.ReadAsStringAsync(cts.Token);
+            if (!resp.IsSuccessStatusCode) throw new ApiException((int)resp.StatusCode, ChatClient.ErrorMessage(text));
+            var obj = JsonNodeExt.ParseOrNull(text);
+            var tag = obj.Str("tag_name");
+            var assets = (obj?["assets"] as JsonArray ?? []).Select(a => new ReleaseAsset(a.Str("name"), a.Str("browser_download_url"),
+                a?["size"] is JsonValue v && v.TryGetValue<long>(out var l) ? l : 0)).ToList();
+            if (tag.Length > 0 && assets.Count > 0) return (tag, assets);
+            throw new ApiException(0, "The release list was empty.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception)
+        {
+            // The GitHub API is rate-limited (60 requests/hour per IP) and blocked on some networks.
+            // The release page redirect still tells us the latest tag; the file names follow a fixed pattern.
+            var tag = await LatestTagFromRedirect(ct);
+            return (tag, GuessAssets(tag));
+        }
+    }
+
+    static readonly HttpClient NoRedirect = new(new SocketsHttpHandler { AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(20) })
+    {
+        Timeout = TimeSpan.FromSeconds(30),
+    };
+
+    static async Task<string> LatestTagFromRedirect(CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Head, "https://github.com/ggml-org/llama.cpp/releases/latest");
+        req.Headers.TryAddWithoutValidation("User-Agent", "Synapse-Windows");
+        using var resp = await NoRedirect.SendAsync(req, ct);
+        var location = resp.Headers.Location?.ToString() ?? "";
+        var m = Regex.Match(location, @"/releases/tag/([^/?#]+)");
+        if (!m.Success) throw new ApiException((int)resp.StatusCode, "Couldn't reach GitHub to find the latest llama.cpp release. Check your internet connection (or proxy/firewall) and try again.");
+        return Uri.UnescapeDataString(m.Groups[1].Value);
+    }
+
+    /// The Windows assets every llama.cpp release publishes (see its release-publish workflow).
+    internal static List<ReleaseAsset> GuessAssets(string tag)
+    {
+        string Url(string name) => $"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{name}";
+        var names = new List<string>();
+        foreach (var arch in new[] { "x64", "arm64" })
+        {
+            names.Add($"llama-{tag}-bin-win-cpu-{arch}.zip");
+            names.Add($"llama-{tag}-bin-win-vulkan-{arch}.zip");
+            names.Add($"llama-{tag}-bin-win-cuda-13.4-{arch}.zip");
+            names.Add($"cudart-llama-bin-win-cuda-13.4-{arch}.zip");
+        }
+        names.Add($"llama-{tag}-bin-win-cuda-12.4-x64.zip");
+        names.Add("cudart-llama-bin-win-cuda-12.4-x64.zip");
+        names.Add($"llama-{tag}-bin-win-rocm-10.0-x64.zip");
+        return names.Select(n => new ReleaseAsset(n, Url(n), 0)).ToList();
+    }
+
+    /// Installs llama.cpp if it's missing (e.g. the first time a local model runs). Waits for an install already in progress.
+    public async Task EnsureInstalled(CancellationToken ct = default)
+    {
+        if (IsAvailable) return;
+        if (!OperatingSystem.IsWindows())
+            throw new ApiException(0, "llama.cpp isn't installed. Install it and set the path to llama-server in Models → Engine.");
+        if (Installing)
+        {
+            while (Installing) await Task.Delay(300, ct);
+        }
+        else await Install(AppSettings.Shared.LlamaBackend, ct);
+        if (!IsAvailable)
+        {
+            var last = InstallLog.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "";
+            throw new ApiException(0, "Couldn't install llama.cpp. " + last.TrimStart('✗', ' ') + "\nOpen Models → Engine to see the log and retry.");
+        }
     }
 
     public async Task Install(string backend, CancellationToken ct = default)
@@ -277,56 +354,44 @@ public sealed class LocalEngine(IPlatform platform, Action changed)
         {
             if (!OperatingSystem.IsWindows())
             {
-                Log("Automatic install downloads the Windows build of llama.cpp. On this system, install llama.cpp yourself and set its path in Settings → Models.");
+                Log("Automatic install downloads the Windows build of llama.cpp. On this system, install llama.cpp yourself and set its path in Models → Engine.");
                 return;
             }
             var hw = platform.Hardware;
-            if (backend == "auto") backend = AutoBackend(hw);
-            Log($"Checking the latest llama.cpp release… (backend: {backend}, {hw.Arch})");
+            if (string.IsNullOrEmpty(backend) || backend == "auto") backend = AutoBackend(hw);
+            Log($"Checking the latest llama.cpp release… (build: {backend}, {hw.Arch}{(hw.BestGpu is { } g ? ", " + g.Name : "")})");
             var (tag, assets) = await LatestRelease(ct);
-            var pick = PickAssets(assets, backend, hw.Arch);
-            if (pick.Count == 0) throw new ApiException(0, $"No Windows build found in llama.cpp {tag}.");
-            var actualBackend = Regex.Match(pick[0].Name, @"bin-win-(.+)-(x64|arm64)\.zip").Groups[1].Value;
-            if (Installed is { } current && current.Tag == tag && current.Backend == actualBackend)
+            Log($"Latest release: {tag}");
+            // If the GPU build fails (e.g. a missing file), fall back to Vulkan, then the CPU build.
+            var order = new List<string> { backend };
+            if (backend != "vulkan" && backend != "cpu") order.Add("vulkan");
+            if (backend != "cpu") order.Add("cpu");
+            Exception? last = null;
+            foreach (var b in order)
             {
-                Log($"✓ llama.cpp {tag} ({actualBackend}) is already installed and up to date.");
-                return;
+                var pick = PickAssets(assets, b, hw.Arch);
+                if (pick.Count == 0) continue;
+                var actual = Regex.Match(pick[0].Name, @"bin-win-(.+)-(x64|arm64)\.zip").Groups[1].Value;
+                if (Installed is { } current && current.Tag == tag && current.Backend == actual)
+                {
+                    Log($"✓ llama.cpp {tag} ({actual}) is already installed and up to date.");
+                    return;
+                }
+                try
+                {
+                    await InstallAssets(tag, actual, pick, Log, ct);
+                    InstallProgress = 1;
+                    Log($"✓ llama.cpp {tag} ({actual}) installed.");
+                    return;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception e)
+                {
+                    last = e;
+                    Log($"  {actual} build failed: {(e is ApiException a ? a.Describe() : e.Message)}");
+                }
             }
-            var folder = Path.Combine(InstallRoot, $"{tag}-{actualBackend}");
-            var staging = folder + ".staging";
-            if (Directory.Exists(staging)) Directory.Delete(staging, true);
-            Directory.CreateDirectory(staging);
-            long total = pick.Sum(x => x.Size), done = 0;
-            foreach (var asset in pick)
-            {
-                Log($"Downloading {asset.Name} ({Util.FormatBytes(asset.Size)})…");
-                var zip = Path.Combine(Paths.Engines, asset.Name);
-                var before = done;
-                await DownloadManager.DownloadFile(new HttpRequestMessage(HttpMethod.Get, asset.Url), zip,
-                    got => InstallProgress = total > 0 ? (double)(before + got) / total : 0, null, changed, ct);
-                done += asset.Size;
-                Log($"Extracting {asset.Name}…");
-                await Task.Run(() => ZipFile.ExtractToDirectory(zip, staging, overwriteFiles: true), ct);
-                try { File.Delete(zip); } catch { }
-            }
-            // Some zips nest everything in a folder; flatten so llama-server.exe sits at the top.
-            var exe = Directory.EnumerateFiles(staging, ExeName, SearchOption.AllDirectories).FirstOrDefault()
-                      ?? throw new ApiException(0, "The download didn't contain llama-server.exe.");
-            var exeDir = Path.GetDirectoryName(exe)!;
-            if (!exeDir.Equals(staging, StringComparison.OrdinalIgnoreCase))
-                foreach (var f in Directory.EnumerateFiles(staging, "*.dll", SearchOption.AllDirectories))
-                    if (!Path.GetDirectoryName(f)!.Equals(exeDir, StringComparison.OrdinalIgnoreCase))
-                        File.Copy(f, Path.Combine(exeDir, Path.GetFileName(f)), overwrite: true);
-            Stop();
-            if (Directory.Exists(folder)) Directory.Delete(folder, true);
-            Directory.Move(staging, folder);
-            var finalDir = Path.Combine(folder, Path.GetRelativePath(staging, exeDir));
-            Json.WriteFile(InfoFile, new InstalledEngine(tag, actualBackend, Path.GetFullPath(finalDir)));
-            // Remove older builds.
-            foreach (var d in Directory.EnumerateDirectories(InstallRoot))
-                if (!Util.IsInside(finalDir, d)) try { Directory.Delete(d, true); } catch { }
-            InstallProgress = 1;
-            Log($"✓ llama.cpp {tag} ({actualBackend}) installed.");
+            throw last ?? new ApiException(0, $"No Windows build found in llama.cpp {tag}.");
         }
         catch (OperationCanceledException) { Log("Cancelled."); }
         catch (Exception e) { Log("✗ Install failed: " + (e is ApiException a ? a.Describe() : e.Message)); }
@@ -335,6 +400,45 @@ public sealed class LocalEngine(IPlatform platform, Action changed)
             Installing = false;
             changed();
         }
+    }
+
+    async Task InstallAssets(string tag, string backend, List<ReleaseAsset> pick, Action<string> log, CancellationToken ct)
+    {
+        var folder = Path.Combine(InstallRoot, $"{tag}-{backend}");
+        var staging = folder + ".staging";
+        if (Directory.Exists(staging)) Directory.Delete(staging, true);
+        Directory.CreateDirectory(staging);
+        long total = pick.Sum(x => x.Size), done = 0;
+        var index = 0;
+        foreach (var asset in pick)
+        {
+            log($"Downloading {asset.Name}{(asset.Size > 0 ? $" ({Util.FormatBytes(asset.Size)})" : "")}…");
+            var zip = Path.Combine(Paths.Engines, asset.Name);
+            var before = done;
+            var i = index++;
+            await DownloadManager.DownloadFile(new HttpRequestMessage(HttpMethod.Get, asset.Url), zip,
+                got => InstallProgress = total > 0 ? (double)(before + got) / total : (i + Math.Min(0.95, got / 300_000_000.0)) / pick.Count,
+                null, changed, ct);
+            done += asset.Size > 0 ? asset.Size : new FileInfo(zip).Length;
+            log($"Extracting {asset.Name}…");
+            await Task.Run(() => ZipFile.ExtractToDirectory(zip, staging, overwriteFiles: true), ct);
+            try { File.Delete(zip); } catch { }
+        }
+        // Some zips nest everything in a folder; flatten so llama-server.exe sits next to its DLLs.
+        var exe = Directory.EnumerateFiles(staging, ExeName, SearchOption.AllDirectories).FirstOrDefault()
+                  ?? throw new ApiException(0, "The download didn't contain llama-server.exe.");
+        var exeDir = Path.GetDirectoryName(exe)!;
+        foreach (var f in Directory.EnumerateFiles(staging, "*.dll", SearchOption.AllDirectories))
+            if (!Path.GetDirectoryName(f)!.Equals(exeDir, StringComparison.OrdinalIgnoreCase))
+                File.Copy(f, Path.Combine(exeDir, Path.GetFileName(f)), overwrite: true);
+        Stop();
+        if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        Directory.Move(staging, folder);
+        var finalDir = Path.Combine(folder, Path.GetRelativePath(staging, exeDir));
+        Json.WriteFile(InfoFile, new InstalledEngine(tag, backend, Path.GetFullPath(finalDir)));
+        // Remove older builds.
+        foreach (var d in Directory.EnumerateDirectories(InstallRoot))
+            if (!Util.IsInside(finalDir, d)) try { Directory.Delete(d, true); } catch { }
     }
 
     /// Asks the installed llama-server for its version (e.g. "version: 6123 (abc1234)").

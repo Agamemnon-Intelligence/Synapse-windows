@@ -34,7 +34,11 @@ public sealed class Agent(AppState app, Chat chat, CancellationToken ct)
                 Append(new ChatMessage(Role.Assistant, "That local model was deleted. Pick another model.") { IsError = true });
                 return;
             }
-            var placeholder = Append(new ChatMessage(Role.Assistant) { ModelName = model.Name, Status = $"Loading {local.DisplayName}…" });
+            var placeholder = Append(new ChatMessage(Role.Assistant)
+            {
+                ModelName = model.Name,
+                Status = app.Engine.IsAvailable ? $"Loading {local.DisplayName}…" : "Installing llama.cpp (one time, a few minutes)…",
+            });
             try { await app.LoadLocal(local, ct); }
             catch (OperationCanceledException) { Remove(placeholder); return; }
             catch (Exception e)

@@ -214,3 +214,19 @@ public class SearchParsingTests
         Assert.StartsWith("https://duckduckgo.com/?q=best%20pizza", BrowserAgent.Normalize("best pizza"));
     }
 }
+
+public class LlamaFallbackTests
+{
+    [Theory]
+    [InlineData("cuda-12", "x64", "llama-b9000-bin-win-cuda-12.4-x64.zip,cudart-llama-bin-win-cuda-12.4-x64.zip")]
+    [InlineData("cuda-13", "arm64", "llama-b9000-bin-win-cuda-13.4-arm64.zip,cudart-llama-bin-win-cuda-13.4-arm64.zip")]
+    [InlineData("vulkan", "x64", "llama-b9000-bin-win-vulkan-x64.zip")]
+    [InlineData("cpu", "x64", "llama-b9000-bin-win-cpu-x64.zip")]
+    public void GuessedAssetsMatchTheReleaseNames(string backend, string arch, string expected)
+    {
+        var assets = LocalEngine.GuessAssets("b9000");
+        var picked = LocalEngine.PickAssets(assets, backend, arch);
+        Assert.Equal(expected, string.Join(",", picked.Select(a => a.Name)));
+        Assert.All(picked, a => Assert.StartsWith("https://github.com/ggml-org/llama.cpp/releases/download/", a.Url));
+    }
+}

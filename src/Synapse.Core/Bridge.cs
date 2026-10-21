@@ -545,6 +545,9 @@ public sealed class BridgeHost
                 if (v.SizeBytes > 0 && v.SizeBytes * 1.02 > app.Platform.Hardware.FreeDiskBytes && app.Platform.Hardware.FreeDiskBytes > 0)
                     throw new ApiException(0, $"Not enough disk space: needs {Util.FormatBytes(v.SizeBytes)}.");
                 app.Downloads.Start(v, a.Str("name").IfEmpty(v.Repo.Split('/').Last()));
+                // Fetch the engine alongside the first model so it's ready when the download finishes.
+                if (!app.Engine.IsAvailable && !app.Engine.Installing && app.Platform.IsWindows)
+                    _ = app.Engine.Install(app.Settings.LlamaBackend);
                 return null;
             }
             case "cancelDownload": app.Downloads.Cancel(a.Str("id")); return null;
