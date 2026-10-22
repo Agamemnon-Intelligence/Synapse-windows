@@ -255,3 +255,26 @@ public class LlamaReleaseTests
         Assert.Equal("b7004", LocalEngine.LatestBuildTag(html));
     }
 }
+
+public class JsonFileTests
+{
+    [Fact]
+    public void KeepsPreviousVersionAndFallsBackToIt()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"synapse-json-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "state.json");
+            Json.WriteFile(path, new Dictionary<string, string> { ["v"] = "1" });
+            Json.WriteFile(path, new Dictionary<string, string> { ["v"] = "2" });
+            Assert.Equal("1", Json.ReadFile<Dictionary<string, string>>(path + ".bak")!["v"]);
+
+            File.WriteAllText(path, "{ truncated");
+            var read = Json.ReadFile<Dictionary<string, string>>(path, out var fromBackup);
+            Assert.True(fromBackup);
+            Assert.Equal("1", read!["v"]);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}

@@ -148,7 +148,14 @@ export function mount(container, ctx) {
     const existing = rows.get(m.id);
     if (existing && existing.sig === sig) return existing.el;
     const el = m.role === 'user' ? userRow(m, last) : m.role === 'assistant' ? assistantRow(m, live, last, answered) : m.role === 'tool' ? toolRow(m) : h('div');
-    if (existing) existing.el.replaceWith(el);
+    if (existing) {
+      // Update the row in place: a fresh element would replay the fade-in on every streamed
+      // token, so the reply looked faded until it finished.
+      existing.el.className = el.className;
+      existing.el.replaceChildren(...el.childNodes);
+      existing.sig = sig;
+      return existing.el;
+    }
     rows.set(m.id, { el, sig });
     return el;
   }

@@ -121,14 +121,11 @@ public sealed class AppState
 
     void Load()
     {
-        var s = Json.ReadFile<SavedState>(Paths.StateFile);
-        if (s == null)
-        {
-            // A damaged state file is kept aside instead of being overwritten.
-            if (File.Exists(Paths.StateFile))
-                try { File.Copy(Paths.StateFile, Paths.StateFile + $".broken-{DateTime.Now:yyyyMMddHHmmss}", true); } catch { }
-            return;
-        }
+        var s = Json.ReadFile<SavedState>(Paths.StateFile, out var fromBackup);
+        // A damaged state file is kept aside instead of being overwritten.
+        if ((s == null || fromBackup) && File.Exists(Paths.StateFile))
+            try { File.Copy(Paths.StateFile, Paths.StateFile + $".broken-{DateTime.Now:yyyyMMddHHmmss}", true); } catch { }
+        if (s == null) return;
         Chats = s.Chats;
         Projects = s.Projects;
         LocalModels = s.LocalModels.Where(m => Directory.Exists(m.Directory)).ToList();

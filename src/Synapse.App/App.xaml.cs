@@ -10,17 +10,26 @@ public partial class App : Application
 {
     const string MutexName = @"Local\Synapse.SingleInstance";
     const string ActivateName = @"Local\Synapse.Activate";
+    /// Set by the installer (or `Synapse.exe --quit`) so a running copy saves and exits before an update.
+    const string QuitName = @"Local\Synapse.Quit";
     Mutex? _mutex;
     EventWaitHandle? _activate;
+    EventWaitHandle? _quit;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         // One Synapse per user: a second launch just brings the first one forward.
         _mutex = new Mutex(true, MutexName, out var first);
+        var quit = e.Args.Contains("--quit");
         if (!first)
         {
-            try { EventWaitHandle.OpenExisting(ActivateName).Set(); } catch { }
+            try { EventWaitHandle.OpenExisting(quit ? QuitName : ActivateName).Set(); } catch { }
+            Shutdown();
+            return;
+        }
+        if (quit)
+        {
             Shutdown();
             return;
         }
@@ -41,6 +50,12 @@ public partial class App : Application
             while (_activate.WaitOne()) Dispatcher.InvokeAsync(window.ShowFromTray);
         }) { IsBackground = true, Name = "Synapse activation" };
         thread.Start();
+
+        _quit = new EventWaitHandle(false, EventResetMode.AutoReset, QuitName);
+        new Thread(() =>
+        {
+            if (_quit.WaitOne()) Dispatcher.InvokeAsync(window.Quit);
+        }) { IsBackground = true, Name = "Synapse quit" }.Start();
     }
 
     void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
