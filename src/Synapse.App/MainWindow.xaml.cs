@@ -358,6 +358,12 @@ public partial class MainWindow : Window
             else { ShowFromTray(); SendHost("focusComposer"); }
             handled = true;
         }
+        // Sign-out, shutdown, or an installer closing Synapse through the Restart Manager: closing
+        // to the tray would get the process killed, so save first and then quit for real.
+        else if (msg == Native.WM_QUERYENDSESSION)
+            try { _app?.Save(); } catch { }
+        else if (msg == Native.WM_ENDSESSION && wParam != IntPtr.Zero)
+            Quit();
         return IntPtr.Zero;
     }
 

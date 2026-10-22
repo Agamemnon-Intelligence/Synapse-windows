@@ -30,15 +30,33 @@ public static class Json
     public static string Serialize<T>(T value, bool pretty = false) => JsonSerializer.Serialize(value, pretty ? Pretty : Options);
     public static T? Deserialize<T>(string s) => JsonSerializer.Deserialize<T>(s, Options);
 
-    /// Writes atomically: a crash mid-write never leaves a truncated state file.
+    /// Writes atomically: a crash mid-write never leaves a truncated state file. The previous
+    /// version is kept as path.bak, so a file a newer or older build can't read is never the only copy.
     public static void WriteFile<T>(string path, T value)
     {
         var tmp = path + ".tmp";
         File.WriteAllText(tmp, Serialize(value, pretty: true));
+        if (File.Exists(path))
+        {
+            try { File.Replace(tmp, path, path + ".bak", ignoreMetadataErrors: true); return; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
         File.Move(tmp, path, overwrite: true);
     }
 
-    public static T? ReadFile<T>(string path)
+    /// Reads path, falling back to path.bak when the file is missing or damaged.
+    public static T? ReadFile<T>(string path) => ReadFile<T>(path, out _);
+
+    public static T? ReadFile<T>(string path, out bool fromBackup)
+    {
+        fromBackup = false;
+        if (TryRead<T>(path) is { } value) return value;
+        fromBackup = true;
+        return TryRead<T>(path + ".bak");
+    }
+
+    static T? TryRead<T>(string path)
     {
         try { return File.Exists(path) ? Deserialize<T>(File.ReadAllText(path)) : default; }
         catch { return default; }

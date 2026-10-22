@@ -75,7 +75,66 @@ Filename: "{app}\Synapse.exe"; Description: "{cm:LaunchProgram,Synapse}"; Flags:
 Type: filesandordirs; Name: "{app}\ui"
 
 [Code]
-const EnvKey = 'Environment';
+const
+  EnvKey = 'Environment';
+  EVENT_MODIFY_STATE = $0002;
+
+function OpenEvent(Access: Cardinal; Inherit: Boolean; Name: string): THandle;
+  external 'OpenEventW@kernel32.dll stdcall';
+function SetEvent(Handle: THandle): Boolean;
+  external 'SetEvent@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+// Asks a running Synapse to save and quit (it listens for this event), then waits for it to exit.
+// Without this, Setup force-closes it and replies still streaming or not yet saved are lost.
+procedure QuitRunningSynapse();
+var Handle: THandle; Waited: Integer;
+begin
+  Handle := OpenEvent(EVENT_MODIFY_STATE, False, 'Local\Synapse.Quit');
+  if Handle = 0 then exit;
+  SetEvent(Handle);
+  CloseHandle(Handle);
+  Waited := 0;
+  while CheckForMutexes('Local\Synapse.SingleInstance') and (Waited < 15000) do
+  begin
+    Sleep(250);
+    Waited := Waited + 250;
+  end;
+end;
+
+procedure CopyIfExists(Src, Dest, Name: string);
+begin
+  if FileExists(Src + '\' + Name) then FileCopy(Src + '\' + Name, Dest + '\' + Name, False);
+end;
+
+// Chats, projects, settings and usage live in %LOCALAPPDATA%\Synapse, which Setup never touches;
+// still, copy them aside before every update so a version change can always be undone.
+procedure BackupUserData();
+var Src, Dest, Name: string; I: Integer;
+begin
+  Src := ExpandConstant('{localappdata}\Synapse');
+  if not FileExists(Src + '\state.json') and not FileExists(Src + '\settings.json') then exit;
+  Dest := Src + '\Backups\' + GetDateTimeString('yyyymmdd-hhnnss', '-', '-') + '-before-{#AppVersion}';
+  if not ForceDirectories(Dest) then exit;
+  for I := 0 to 2 do
+  begin
+    case I of
+      0: Name := 'state.json';
+      1: Name := 'settings.json';
+      2: Name := 'usage.json';
+    end;
+    CopyIfExists(Src, Dest, Name);
+    CopyIfExists(Src, Dest, Name + '.bak');
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  QuitRunningSynapse();
+  BackupUserData();
+  Result := '';
+end;
 
 function CliDir(): string;
 begin
